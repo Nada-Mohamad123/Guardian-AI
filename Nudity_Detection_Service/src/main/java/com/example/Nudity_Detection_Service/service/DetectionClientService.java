@@ -1,8 +1,8 @@
 package com.example.Nudity_Detection_Service.service;
 
 import com.example.Nudity_Detection_Service.dto.DetectionResult;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -11,11 +11,15 @@ import reactor.core.publisher.Mono;
 import java.time.Duration;
 
 @Service
-@RequiredArgsConstructor
-@Slf4j
 public class DetectionClientService {
 
+    private static final Logger log = LoggerFactory.getLogger(DetectionClientService.class);
+
     private final WebClient pythonServiceWebClient;
+
+    public DetectionClientService(WebClient pythonServiceWebClient) {
+        this.pythonServiceWebClient = pythonServiceWebClient;
+    }
 
     public Mono<DetectionResult> analyzeFrame(byte[] frameBytes) {
         return pythonServiceWebClient.post()

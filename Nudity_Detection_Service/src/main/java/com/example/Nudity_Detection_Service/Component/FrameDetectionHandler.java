@@ -4,8 +4,8 @@ import com.example.Nudity_Detection_Service.dto.DetectionResult;
 import com.example.Nudity_Detection_Service.dto.DeviceSession;
 import com.example.Nudity_Detection_Service.service.DatabaseClientService;
 import com.example.Nudity_Detection_Service.service.DetectionClientService;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.BinaryMessage;
 import org.springframework.web.socket.CloseStatus;
@@ -19,19 +19,28 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Component
-@RequiredArgsConstructor
-@Slf4j
 public class FrameDetectionHandler extends BinaryWebSocketHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(FrameDetectionHandler.class);
 
     private final DetectionClientService detectionClientService;
     private final DatabaseClientService databaseClientService;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
-    // sessionId -> device/auth context for that open connection
     private final Map<String, DeviceSession> sessions = new ConcurrentHashMap<>();
+
+    public FrameDetectionHandler(
+            DetectionClientService detectionClientService,
+            DatabaseClientService databaseClientService
+    ) {
+        this.detectionClientService = detectionClientService;
+        this.databaseClientService = databaseClientService;
+    }
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
+        session.setBinaryMessageSizeLimit(10 * 1024 * 1024); // ✅ 10MB
+
         String deviceId = extractParam(session, "deviceId");
         String token = extractParam(session, "token");
 
@@ -48,9 +57,7 @@ public class FrameDetectionHandler extends BinaryWebSocketHandler {
     @Override
     protected void handleBinaryMessage(WebSocketSession session, BinaryMessage message) {
         DeviceSession deviceSession = sessions.get(session.getId());
-        if (deviceSession == null) {
-            return;
-        }
+        if (deviceSession == null) return;
 
         byte[] frameBytes = message.getPayload().array();
 
@@ -63,11 +70,8 @@ public class FrameDetectionHandler extends BinaryWebSocketHandler {
 
     private void handleDetectionResult(WebSocketSession session, DeviceSession deviceSession,
                                        DetectionResult result) {
-        // 1. Reply to the Android app immediately - this is the whole point of WebSocket
         sendResult(session, result);
 
-        // 2. If something unsafe was found, persist it asynchronously.
-        //    This does NOT block the next frame's reply.
         if (result.isDetected()) {
             persistDetection(deviceSession, result);
         }

@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html>
+<body>
+
+<input type="file" id="file">
+<button id="sendBtn">Send</button>
+
+<pre id="result"></pre>
+
+<script>
+const result = document.getElementById("result");
+
+const ws = new WebSocket("ws://localhost:8082/ws/violence?deviceId=device123&token=test-token");
+
+ws.onopen = () => {
+    result.textContent += "Connected\n";
+};
+
+ws.onmessage = e => {
+    result.textContent += "Response:\n" + e.data + "\n";
+};
+
+ws.onerror = e => {
+    result.textContent += "WebSocket error\n";
+};
+
+ws.onclose = () => {
+    result.textContent += "Connection closed\n";
+};
+
+document.getElementById("sendBtn").onclick = async () => {
+    const file = document.getElementById("file").files[0];
+
+    if (!file) {
+        alert("Choose an image first");
+        return;
+    }
+
+    const buffer = await file.arrayBuffer();
+
+    result.textContent += `Sending ${buffer.byteLength} bytes...\n`;
+
+    ws.send(buffer);
+};
+</script>
+
+</body>
+</html>
