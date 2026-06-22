@@ -1,7 +1,7 @@
 package com.example.child_safety_service.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
@@ -9,16 +9,15 @@ import com.example.child_safety_service.dto.DetectionResult;
 import java.util.Map;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class DatabaseClientService {
 
     private final WebClient dbServiceWebClient;
 
-    /**
-     * POST /api/devices/{deviceId}/logs
-     * Returns the created log's id (logId).
-     */
+    public DatabaseClientService(@Qualifier("dbServiceWebClient") WebClient dbServiceWebClient) {
+        this.dbServiceWebClient = dbServiceWebClient;
+    }
+
     public Mono<String> createContentLog(String deviceId, String authToken, String contentType) {
         return dbServiceWebClient.post()
                 .uri("/api/devices/{deviceId}/logs", deviceId)
@@ -34,17 +33,13 @@ public class DatabaseClientService {
                 .onErrorResume(e -> Mono.empty());
     }
 
-    /**
-     * POST /api/logs/{logId}/detection
-     */
     public Mono<String> createDetection(String logId, String authToken, DetectionResult result) {
         return dbServiceWebClient.post()
                 .uri("/api/logs/{logId}/detection", logId)
                 .header("Authorization", "Bearer " + authToken)
                 .bodyValue(Map.of(
                         "category", result.getCategory(),
-                        "confidenceScore", result.getConfidence(),
-                        "actionTaken", result.getAction()
+                        "confidenceScore", result.getConfidence()
                 ))
                 .retrieve()
                 .bodyToMono(Map.class)
@@ -53,9 +48,6 @@ public class DatabaseClientService {
                 .onErrorResume(e -> Mono.empty());
     }
 
-    /**
-     * POST /api/devices/{deviceId}/auto-alert/{detectionId}
-     */
     public Mono<Void> createAlert(String deviceId, String detectionId, String authToken,
                                   DetectionResult result) {
         return dbServiceWebClient.post()

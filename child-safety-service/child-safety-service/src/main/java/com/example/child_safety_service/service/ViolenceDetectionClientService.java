@@ -1,7 +1,7 @@
 package com.example.child_safety_service.service;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -10,16 +10,15 @@ import com.example.child_safety_service.dto.DetectionResult;
 import java.time.Duration;
 
 @Service
-@RequiredArgsConstructor
 @Slf4j
 public class ViolenceDetectionClientService {
 
     private final WebClient pythonServiceWebClient;
 
-    /**
-     * Sends a single raw image frame (bytes) to the Python YOLO service
-     * and returns the detection result.
-     */
+    public ViolenceDetectionClientService(@Qualifier("pythonServiceWebClient") WebClient pythonServiceWebClient) {
+        this.pythonServiceWebClient = pythonServiceWebClient;
+    }
+
     public Mono<DetectionResult> analyzeFrame(byte[] frameBytes) {
         return pythonServiceWebClient.post()
                 .uri("/predict-frame")

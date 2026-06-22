@@ -39,7 +39,6 @@ def decode_image(base64_str):
 # ================= CORE PREDICTION =================
 def predict_image(frame):
     results = model.predict(frame, verbose=False, conf=CONF_THRESHOLD)
-
     boxes = results[0].boxes
     detections = []
     if boxes is not None and len(boxes) > 0:
@@ -100,7 +99,6 @@ def predict_video():
             all_detections.append(result)
     finally:
         cap.release()
-        # ✅ شيلنا cv2.destroyAllWindows() عشان مش شغالة مع headless OpenCV
         gc.collect()
         time.sleep(1)
         try:
@@ -121,8 +119,8 @@ def predict_frame():
         "detected": False,
         "category": "NONE",
         "confidence": 0.0,
-        "action": "ALLOWED",
         "contentType": "IMAGE",
+        "boundingBoxes": []
     }
 
     if not frame_bytes:
@@ -138,21 +136,34 @@ def predict_frame():
 
     result = predict_image(frame)
 
+    # ✅ ADD THIS — see how many boxes the model actually found
+    logging.info(f"Total detections: {result['total_boxes']}")
+    for d in result["detections"]:
+        logging.info(f"  bbox={d['bbox']} conf={d['confidence']:.2f}")
+
     detected = result["total_boxes"] > 0
     max_confidence = 0.0
-    if detected:
-        max_confidence = max(d["confidence"] for d in result["detections"])
+    bounding_boxes = []
 
-    action = "ALLOWED"
     if detected:
-        action = "BLOCKED" if max_confidence >= BLOCK_THRESHOLD else "FLAGGED"
+        for d in result["detections"]:
+            conf = d["confidence"]
+            if conf > max_confidence:
+                max_confidence = conf
+            x1, y1, x2, y2 = d["bbox"]
+            bounding_boxes.append({
+                "x": x1,
+                "y": y1,
+                "width":  x2 - x1,
+                "height": y2 - y1
+            })
 
     return jsonify({
         "detected": detected,
         "category": "VIOLENCE" if detected else "NONE",
         "confidence": round(max_confidence, 2),
-        "action": action,
         "contentType": "IMAGE",
+        "boundingBoxes": bounding_boxes
     })
 # ================= HEALTH =================
 @app.route("/health", methods=["GET"])

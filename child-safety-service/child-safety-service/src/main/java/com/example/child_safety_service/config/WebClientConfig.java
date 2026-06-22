@@ -1,5 +1,6 @@
 package com.example.child_safety_service.config;
 
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -19,20 +20,22 @@ public class WebClientConfig {
     private String dbServiceUrl;
 
     @Bean
+    @Qualifier("pythonServiceWebClient")
     public WebClient pythonServiceWebClient() {
         HttpClient httpClient = HttpClient.create()
-                .responseTimeout(Duration.ofMinutes(10)); // ✅ زودنا لـ 10 دقايق عشان الفيديو
+                .responseTimeout(Duration.ofMinutes(10));
 
         return WebClient.builder()
                 .baseUrl(pythonServiceUrl)
                 .clientConnector(new ReactorClientHttpConnector(httpClient))
                 .codecs(configurer -> configurer
                         .defaultCodecs()
-                        .maxInMemorySize(500 * 1024 * 1024)) // ✅ 500MB عشان الفيديو
+                        .maxInMemorySize(500 * 1024 * 1024))
                 .build();
     }
 
     @Bean
+    @Qualifier("dbServiceWebClient")
     public WebClient dbServiceWebClient() {
         return WebClient.builder()
                 .baseUrl(dbServiceUrl)
