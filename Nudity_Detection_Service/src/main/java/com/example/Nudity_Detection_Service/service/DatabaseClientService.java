@@ -41,8 +41,8 @@ public class DatabaseClientService {
                 .header("Authorization", "Bearer " + authToken)
                 .bodyValue(Map.of(
                         "category", result.getCategory(),
-                        "confidenceScore", result.getConfidence(),
-                        "actionTaken", result.getAction()
+                        "confidenceScore", result.getConfidence()
+
                 ))
                 .retrieve()
                 .bodyToMono(Map.class)

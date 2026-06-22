@@ -1,9 +1,8 @@
-from fastapi import FastAPI, Request, UploadFile, File
+from fastapi import FastAPI, Request
 import cv2
 import numpy as np
 import mediapipe as mp
-import tempfile
-import os
+from typing import List
 
 app = FastAPI()
 
@@ -22,40 +21,8 @@ SAFE_RESULT = {
     "confidence": 0.0,
     "action": "ALLOWED",
     "contentType": "IMAGE",
+    "boundingBoxes": []
 }
-
-
-def analyze_frame(frame):
-    h, w, _ = frame.shape
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    skin_mask = cv2.inRange(hsv, LOWER, UPPER)
-
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = pose.process(rgb)
-
-    detected = False
-    confidence = 0.0
-
-    if results.pose_landmarks:
-        skin_area = cv2.countNonZero(skin_mask)
-        total_area = h * w
-        ratio = skin_area / total_area
-
-        if ratio > SKIN_RATIO_THRESHOLD:
-            detected = True
-            confidence = min(ratio * 2, 1.0)
-
-    action = "ALLOWED"
-    if detected:
-        action = "BLOCKED" if confidence > BLOCK_THRESHOLD else "FLAGGED"
-
-    return {
-        "detected": detected,
-        "category": "ADULT" if detected else "NONE",
-        "confidence": round(confidence, 2),
-        "action": action,
-        "contentType": "IMAGE",
-    }
 
 
 @app.get("/health")
@@ -71,65 +38,110 @@ async def analyze(request: Request):
         return SAFE_RESULT
 
     nparr = np.frombuffer(frame_bytes, np.uint8)
+
     if nparr.size == 0:
         return SAFE_RESULT
 
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
     if frame is None:
         return SAFE_RESULT
 
-    return analyze_frame(frame)
+    h, w, _ = frame.shape
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    skin_mask = cv2.inRange(hsv, LOWER, UPPER)
 
+    # تنظيف الـ mask
+    kernel = np.ones((5, 5), np.uint8)
+    skin_mask = cv2.erode(skin_mask, kernel, iterations=1)
+    skin_mask = cv2.dilate(skin_mask, kernel, iterations=2)
+    skin_mask = cv2.morphologyEx(skin_mask, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
 
-# ================= VIDEO =================
-@app.post("/analyze-video")
-async def analyze_video(file: UploadFile = File(...)):
-    # Save uploaded video to a temp file
-    suffix = os.path.splitext(file.filename)[1] or ".mp4"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(await file.read())
-        tmp_path = tmp.name
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = pose.process(rgb)
 
-    cap = cv2.VideoCapture(tmp_path)
-    total_frames = 0
-    unsafe_frames = 0
-    detections_per_frame = []
-    max_confidence = 0.0
-    overall_detected = False
+    detected = False
+    confidence = 0.0
+    bounding_boxes = []
 
-    try:
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+    if results.pose_landmarks:
+        landmarks = results.pose_landmarks.landmark
 
-            total_frames += 1
-            result = analyze_frame(frame)
-            detections_per_frame.append(result)
+        # ---- Exclude face, hands, feet ----
+        exclude_mask = np.zeros((h, w), dtype=np.uint8)
 
-            if result["detected"]:
-                unsafe_frames += 1
-                overall_detected = True
-                if result["confidence"] > max_confidence:
-                    max_confidence = result["confidence"]
-    finally:
-        cap.release()
-        try:
-            os.remove(tmp_path)
-        except:
-            pass
+        def pt(idx):
+            return (int(landmarks[idx].x * w), int(landmarks[idx].y * h))
+
+        # وش
+        face_points = np.array([[int(landmarks[i].x * w),
+                                  int(landmarks[i].y * h)]
+                                 for i in [0,1,2,3,4,5,6,7,8,9,10]],
+                                dtype=np.int32)
+        face_hull = cv2.convexHull(face_points)
+        cv2.fillConvexPoly(exclude_mask, face_hull, 255)
+        exclude_mask = cv2.dilate(exclude_mask, np.ones((35, 35), np.uint8), iterations=1)
+
+        # إيدين وأرجل
+        for idx in [15, 16, 27, 28, 31, 32]:
+            x, y = pt(idx)
+            cv2.circle(exclude_mask, (x, y), 70, 255, -1)
+
+        # body mask
+        body_points = np.array([[int(lm.x * w), int(lm.y * h)]
+                                  for lm in landmarks], dtype=np.int32)
+        body_mask = np.zeros((h, w), dtype=np.uint8)
+        hull = cv2.convexHull(body_points)
+        cv2.fillConvexPoly(body_mask, hull, 255)
+
+        # filtered skin = جوه الجسم بس، بدون وش/إيدين/أرجل
+        filtered_skin = cv2.bitwise_and(skin_mask, body_mask)
+        filtered_skin = cv2.bitwise_and(filtered_skin, cv2.bitwise_not(exclude_mask))
+
+        # ---- حساب الـ bounding boxes ----
+        contours, _ = cv2.findContours(
+            filtered_skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        significant_contours = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < 800:
+                continue
+            x, y, bw, bh = cv2.boundingRect(cnt)
+            aspect_ratio = bw / float(bh)
+            if aspect_ratio < 0.2 or aspect_ratio > 4:
+                continue
+            if x < 5 or y < 5:
+                continue
+            significant_contours.append((area, x, y, bw, bh))
+
+        if significant_contours:
+            skin_area = sum(a for a, *_ in significant_contours)
+            total_area = h * w
+            ratio = skin_area / total_area
+
+            if ratio > SKIN_RATIO_THRESHOLD:
+                detected = True
+                confidence = min(ratio * 2, 1.0)
+
+                for area, x, y, bw, bh in significant_contours:
+                    bounding_boxes.append({
+                        "x": x,
+                        "y": y,
+                        "width": bw,
+                        "height": bh
+                    })
 
     action = "ALLOWED"
-    if overall_detected:
-        action = "BLOCKED" if max_confidence > BLOCK_THRESHOLD else "FLAGGED"
+    if detected:
+        action = "BLOCKED" if confidence > BLOCK_THRESHOLD else "FLAGGED"
 
     return {
-        "detected": overall_detected,
-        "category": "ADULT" if overall_detected else "NONE",
-        "confidence": round(max_confidence, 2),
+        "detected": detected,
+        "category": "ADULT" if detected else "NONE",
+        "confidence": round(confidence, 2),
         "action": action,
-        "contentType": "VIDEO",
-        "total_frames": total_frames,
-        "unsafe_frames": unsafe_frames,
-        "detections_per_frame": detections_per_frame
+        "contentType": "IMAGE",
+        "boundingBoxes": bounding_boxes
     }
