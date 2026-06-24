@@ -35,21 +35,30 @@ async def analyze(request: Request):
     frame_bytes = await request.body()
 
     if not frame_bytes:
+        print("ERROR: Empty body received")
         return SAFE_RESULT
 
     nparr = np.frombuffer(frame_bytes, np.uint8)
 
     if nparr.size == 0:
+        print("ERROR: Empty numpy array")
         return SAFE_RESULT
 
     frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
     if frame is None:
+        print("ERROR: Could not decode image — bytes may not be a valid image")
         return SAFE_RESULT
 
     h, w, _ = frame.shape
+    print(f"✓ Frame decoded: {w}x{h} pixels, {len(frame_bytes)} bytes")
+
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     skin_mask = cv2.inRange(hsv, LOWER, UPPER)
+
+    raw_skin_area = cv2.countNonZero(skin_mask)
+    raw_ratio = raw_skin_area / (h * w)
+    print(f"✓ Raw skin ratio (before morphology): {raw_ratio:.3f}")
 
     # تنظيف الـ mask
     kernel = np.ones((5, 5), np.uint8)
@@ -60,20 +69,21 @@ async def analyze(request: Request):
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = pose.process(rgb)
 
+    print(f"✓ Pose landmarks detected: {results.pose_landmarks is not None}")
+
     detected = False
     confidence = 0.0
     bounding_boxes = []
 
     if results.pose_landmarks:
         landmarks = results.pose_landmarks.landmark
+        print(f"✓ Number of landmarks: {len(landmarks)}")
 
-        # ---- Exclude face, hands, feet ----
         exclude_mask = np.zeros((h, w), dtype=np.uint8)
 
         def pt(idx):
             return (int(landmarks[idx].x * w), int(landmarks[idx].y * h))
 
-        # وش
         face_points = np.array([[int(landmarks[i].x * w),
                                   int(landmarks[i].y * h)]
                                  for i in [0,1,2,3,4,5,6,7,8,9,10]],
@@ -82,26 +92,26 @@ async def analyze(request: Request):
         cv2.fillConvexPoly(exclude_mask, face_hull, 255)
         exclude_mask = cv2.dilate(exclude_mask, np.ones((35, 35), np.uint8), iterations=1)
 
-        # إيدين وأرجل
         for idx in [15, 16, 27, 28, 31, 32]:
             x, y = pt(idx)
             cv2.circle(exclude_mask, (x, y), 70, 255, -1)
 
-        # body mask
         body_points = np.array([[int(lm.x * w), int(lm.y * h)]
                                   for lm in landmarks], dtype=np.int32)
         body_mask = np.zeros((h, w), dtype=np.uint8)
         hull = cv2.convexHull(body_points)
         cv2.fillConvexPoly(body_mask, hull, 255)
 
-        # filtered skin = جوه الجسم بس، بدون وش/إيدين/أرجل
         filtered_skin = cv2.bitwise_and(skin_mask, body_mask)
         filtered_skin = cv2.bitwise_and(filtered_skin, cv2.bitwise_not(exclude_mask))
 
-        # ---- حساب الـ bounding boxes ----
+        filtered_skin_area = cv2.countNonZero(filtered_skin)
+        print(f"✓ Filtered skin pixels: {filtered_skin_area}")
+
         contours, _ = cv2.findContours(
             filtered_skin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
         )
+        print(f"✓ Contours found: {len(contours)}")
 
         significant_contours = []
         for cnt in contours:
@@ -116,14 +126,18 @@ async def analyze(request: Request):
                 continue
             significant_contours.append((area, x, y, bw, bh))
 
+        print(f"✓ Significant contours (after filters): {len(significant_contours)}")
+
         if significant_contours:
             skin_area = sum(a for a, *_ in significant_contours)
             total_area = h * w
             ratio = skin_area / total_area
+            print(f"✓ Final skin ratio: {ratio:.3f} (threshold: {SKIN_RATIO_THRESHOLD})")
 
             if ratio > SKIN_RATIO_THRESHOLD:
                 detected = True
                 confidence = min(ratio * 2, 1.0)
+                print(f"⚠ DETECTED! confidence={confidence:.2f}")
 
                 for area, x, y, bw, bh in significant_contours:
                     bounding_boxes.append({
@@ -132,10 +146,19 @@ async def analyze(request: Request):
                         "width": bw,
                         "height": bh
                     })
+            else:
+                print(f"✗ Ratio {ratio:.3f} below threshold {SKIN_RATIO_THRESHOLD} — not detected")
+        else:
+            print("✗ No significant contours after filtering")
+
+    else:
+        print("✗ No pose landmarks — skipping skin analysis")
 
     action = "ALLOWED"
     if detected:
         action = "BLOCKED" if confidence > BLOCK_THRESHOLD else "FLAGGED"
+
+    print(f"→ Final result: detected={detected}, action={action}, boxes={len(bounding_boxes)}")
 
     return {
         "detected": detected,
