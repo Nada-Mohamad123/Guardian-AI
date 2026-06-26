@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Toxic Bert WS Test</title>
+    <style>
+        body { font-family: Arial; padding: 20px; max-width: 700px; }
+        button { padding: 10px 20px; margin: 5px; color: white; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; }
+        #connectBtn    { background: #28a745; }
+        #disconnectBtn { background: #dc3545; }
+        #sendBtn       { background: #007bff; }
+        input, textarea { width: 100%; padding: 10px; margin: 8px 0; box-sizing: border-box; font-size: 15px; }
+        #log { background: #1e1e1e; color: #00ff00; padding: 15px; height: 350px; overflow-y: auto; border-radius: 8px; font-family: monospace; }
+        label { font-weight: bold; }
+        #status { font-size: 18px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+
+<h2>🧠 Toxic Bert WebSocket Tester</h2>
+
+<!-- STATUS -->
+<div id="status">🔴 Disconnected</div>
+
+<!-- CONNECT -->
+<label>WebSocket URL:</label>
+<input id="url" value="ws://localhost:8088/ws/detection?deviceId=device123&token=mytoken">
+<button id="connectBtn" onclick="connect()">🔌 Connect</button>
+<button id="disconnectBtn" onclick="disconnect()" disabled>❌ Disconnect</button>
+
+<hr>
+
+<!-- SEND -->
+<label>النص اللي هتبعته:</label>
+<textarea id="text" rows="3">أنت غبي جداً</textarea>
+
+<label>Threshold:</label>
+<input id="threshold" type="number" value="0.5" min="0" max="1" step="0.1">
+
+<button id="sendBtn" onclick="send()" disabled>🚀 Send</button>
+
+<hr>
+
+<!-- LOG -->
+<label>📋 النتايج:</label>
+<pre id="log"></pre>
+<button onclick="document.getElementById('log').innerHTML=''" style="background:#6c757d">🗑️ Clear</button>
+
+<script>
+    let ws = null;
+
+    function log(msg, color = "#00ff00") {
+        const box  = document.getElementById("log");
+        const time = new Date().toLocaleTimeString();
+        box.innerHTML += `<span style="color:${color}">[${time}] ${msg}</span>\n`;
+        box.scrollTop  = box.scrollHeight;
+    }
+
+    function connect() {
+        const url = document.getElementById("url").value;
+        log(`Connecting to ${url}...`, "#ffff00");
+
+        ws = new WebSocket(url);
+
+        ws.onopen = () => {
+            document.getElementById("status").textContent       = "🟢 Connected";
+            document.getElementById("connectBtn").disabled      = true;
+            document.getElementById("disconnectBtn").disabled   = false;
+            document.getElementById("sendBtn").disabled         = false;
+            log("✅ Connected!", "#00ff00");
+        };
+
+        ws.onmessage = e => {
+            try {
+                const data = JSON.parse(e.data);
+
+                if (data.status === "connected") {
+                    log(`🔗 Server: connected as ${data.deviceId}`, "#00ffff");
+                    return;
+                }
+
+                const toxic = data.is_toxic ? "🚨 TOXIC" : "✅ SAFE";
+                const color = data.is_toxic ? "#ff4444" : "#00ff00";
+
+                log("─────────────────────────────", "#555555");
+                log(toxic, color);
+                log(`Label    : ${data.max_label}`, color);
+                log(`Score    : ${(data.max_score * 100).toFixed(1)}%`, color);
+                log(`Original : ${data.original_text}`, "#ffffff");
+                log(`Translated: ${data.translated_text}`, "#ffffff");
+                log(`Latency  : ${data.latency_ms} ms`, "#aaaaaa");
+
+            } catch {
+                log(`Raw: ${e.data}`, "#ffffff");
+            }
+        };
+
+        ws.onerror = () => log("❌ Connection error!", "#ff0000");
+
+        ws.onclose = () => {
+            document.getElementById("status").textContent       = "🔴 Disconnected";
+            document.getElementById("connectBtn").disabled      = false;
+            document.getElementById("disconnectBtn").disabled   = true;
+            document.getElementById("sendBtn").disabled         = true;
+            log("🔌 Disconnected", "#ffff00");
+        };
+    }
+
+    function send() {
+        const text      = document.getElementById("text").value.trim();
+        const threshold = parseFloat(document.getElementById("threshold").value);
+
+        if (!text) { log("⚠️ Enter text first!", "#ffaa00"); return; }
+        if (!ws || ws.readyState !== WebSocket.OPEN) { log("❌ Not connected!", "#ff0000"); return; }
+
+        log(`📤 Sending: "${text}"`, "#ffff00");
+        ws.send(JSON.stringify({ text, threshold }));
+    }
+
+    function disconnect() {
+        if (ws) ws.close();
+    }
+</script>
+</body>
+</html>
