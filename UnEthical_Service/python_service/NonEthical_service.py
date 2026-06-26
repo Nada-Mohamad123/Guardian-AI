@@ -7,6 +7,7 @@ import os
 import sys
 import subprocess
 import tempfile
+import shutil
 import numpy as np
 from transformers import (
     AutoTokenizer,
@@ -19,8 +20,6 @@ from transformers import (
 
 # ✅ Linux-compatible cache path (Railway)
 os.environ["HF_HOME"] = "/tmp/huggingface_cache"
-
-# ✅ Removed Windows-specific FFMPEG path (ffmpeg installed via apt in Dockerfile)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -38,21 +37,42 @@ tokenizer = None
 translator_model = None
 translator_tokenizer = None
 whisper_pipe = None
+models_ready = False
 
 
 def load_model():
-    global model, tokenizer, translator_model, translator_tokenizer
-    logger.info("Loading toxic model...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
-    model.eval()
+    global model, tokenizer, translator_model, translator_tokenizer, models_ready
 
-    logger.info("Loading translator...")
-    translator_tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
-    translator_model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
-    translator_model.eval()
+    # ✅ Log free disk space before loading
+    free_mb = shutil.disk_usage("/tmp").free // (1024 * 1024)
+    logger.info(f"Free space in /tmp before loading: {free_mb} MB")
 
-    logger.info("Core models loaded successfully")
+    # ✅ Load toxic-bert
+    try:
+        logger.info("Loading toxic model (unitary/toxic-bert)...")
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+        model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID)
+        model.eval()
+        logger.info("✅ Toxic model loaded successfully")
+    except Exception as e:
+        logger.error(f"❌ FATAL: Failed to load toxic model: {e}", exc_info=True)
+        raise RuntimeError(f"Could not load toxic model: {e}") from e
+
+    # ✅ Load Arabic → English translator
+    try:
+        logger.info("Loading translator (Helsinki-NLP/opus-mt-ar-en)...")
+        translator_tokenizer = AutoTokenizer.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
+        translator_model = AutoModelForSeq2SeqLM.from_pretrained("Helsinki-NLP/opus-mt-ar-en")
+        translator_model.eval()
+        logger.info("✅ Translator loaded successfully")
+    except Exception as e:
+        logger.error(f"❌ FATAL: Failed to load translator model: {e}", exc_info=True)
+        raise RuntimeError(f"Could not load translator model: {e}") from e
+
+    free_mb_after = shutil.disk_usage("/tmp").free // (1024 * 1024)
+    logger.info(f"Free space in /tmp after loading: {free_mb_after} MB")
+    logger.info("✅ All core models loaded and ready")
+    models_ready = True
 
 
 def is_arabic(text):
@@ -60,6 +80,8 @@ def is_arabic(text):
 
 
 def translate(text):
+    if translator_tokenizer is None or translator_model is None:
+        raise RuntimeError("Translator model is not loaded")
     inputs = translator_tokenizer(text, return_tensors="pt", truncation=True, padding=True, max_length=512)
     with torch.no_grad():
         out = translator_model.generate(**inputs)
@@ -73,6 +95,8 @@ def preprocess_text(text):
 
 
 def infer(texts, threshold=0.5):
+    if tokenizer is None or model is None:
+        raise RuntimeError("Toxic model is not loaded")
     inputs = tokenizer(texts, return_tensors="pt", truncation=True, padding=True, max_length=512)
     with torch.no_grad():
         logits = model(**inputs).logits
@@ -99,8 +123,47 @@ def extract_audio(video_path, audio_path):
     subprocess.run(cmd, capture_output=True)
 
 
-# ✅ Load models at startup (required for gunicorn)
-load_model()
+def load_whisper_if_needed():
+    """Load Whisper model on demand (lazy loading to save memory at startup)."""
+    global whisper_pipe
+    if whisper_pipe is None:
+        logger.info("Loading Whisper on demand (openai/whisper-small)...")
+        try:
+            whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                "openai/whisper-small",
+                torch_dtype=torch.float32
+            ).to("cpu")
+            processor = AutoProcessor.from_pretrained("openai/whisper-small")
+            whisper_pipe = pipeline(
+                "automatic-speech-recognition",
+                model=whisper_model,
+                tokenizer=processor.tokenizer,
+                feature_extractor=processor.feature_extractor,
+                device="cpu"
+            )
+            logger.info("✅ Whisper loaded successfully")
+        except Exception as e:
+            logger.error(f"❌ Failed to load Whisper: {e}", exc_info=True)
+            raise RuntimeError(f"Could not load Whisper model: {e}") from e
+
+
+# ✅ Load core models at startup — crash loudly if they fail
+try:
+    load_model()
+except Exception as e:
+    logger.critical(f"💀 Server cannot start: {e}")
+    sys.exit(1)
+
+
+# =========================
+# GUARDS
+# =========================
+
+@app.before_request
+def check_models_ready():
+    """Return 503 immediately if models failed to load."""
+    if not models_ready:
+        return jsonify({"error": "Models are not loaded. Check server logs."}), 503
 
 
 # =========================
@@ -109,53 +172,71 @@ load_model()
 
 @app.route("/health", methods=["GET"])
 def health():
-    return jsonify({"status": "ok", "model": MODEL_ID})
+    return jsonify({
+        "status": "ok",
+        "model": MODEL_ID,
+        "models_ready": models_ready,
+        "whisper_loaded": whisper_pipe is not None
+    })
 
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
-    body = request.get_json(force=True)
-    text = body.get("text", "").strip()
-    threshold = float(body.get("threshold", 0.5))
+    try:
+        body = request.get_json(force=True)
+        text = body.get("text", "").strip()
+        threshold = float(body.get("threshold", 0.5))
 
-    if not text:
-        abort(400, "text required")
+        if not text:
+            abort(400, "text required")
 
-    text_en, tr = preprocess_text(text)
-    t0 = time.perf_counter()
+        text_en, tr = preprocess_text(text)
+        t0 = time.perf_counter()
 
-    res = infer([text_en], threshold)[0]
-    res.update({
-        "original_text": text,
-        "translated_text": text_en,
-        "was_translated": tr,
-        "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
-    })
+        res = infer([text_en], threshold)[0]
+        res.update({
+            "original_text": text,
+            "translated_text": text_en,
+            "was_translated": tr,
+            "latency_ms": round((time.perf_counter() - t0) * 1000, 2)
+        })
 
-    return jsonify(res)
+        return jsonify(res)
+
+    except Exception as e:
+        logger.error(f"Error in /analyze: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/analyze/batch", methods=["POST"])
 def analyze_batch():
-    body = request.get_json(force=True)
-    texts = body.get("texts", [])
-    threshold = float(body.get("threshold", 0.5))
+    try:
+        body = request.get_json(force=True)
+        texts = body.get("texts", [])
+        threshold = float(body.get("threshold", 0.5))
 
-    processed, meta = [], []
-    for t in texts:
-        t_en, tr = preprocess_text(t)
-        processed.append(t_en)
-        meta.append({
-            "original_text": t,
-            "translated_text": t_en,
-            "was_translated": tr
-        })
+        if not texts:
+            abort(400, "texts array required")
 
-    results = infer(processed, threshold)
-    for i in range(len(results)):
-        results[i].update(meta[i])
+        processed, meta = [], []
+        for t in texts:
+            t_en, tr = preprocess_text(t)
+            processed.append(t_en)
+            meta.append({
+                "original_text": t,
+                "translated_text": t_en,
+                "was_translated": tr
+            })
 
-    return jsonify({"results": results})
+        results = infer(processed, threshold)
+        for i in range(len(results)):
+            results[i].update(meta[i])
+
+        return jsonify({"results": results})
+
+    except Exception as e:
+        logger.error(f"Error in /analyze/batch: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/analyze/video", methods=["POST"])
@@ -175,22 +256,7 @@ def analyze_video():
 
     try:
         extract_audio(video_path, audio_path)
-
-        global whisper_pipe
-        if whisper_pipe is None:
-            logger.info("Loading Whisper on demand...")
-            whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                "openai/whisper-small",
-                torch_dtype=torch.float32
-            ).to("cpu")
-            processor = AutoProcessor.from_pretrained("openai/whisper-small")
-            whisper_pipe = pipeline(
-                "automatic-speech-recognition",
-                model=whisper_model,
-                tokenizer=processor.tokenizer,
-                feature_extractor=processor.feature_extractor,
-                device="cpu"
-            )
+        load_whisper_if_needed()
 
         t0 = time.perf_counter()
         asr = whisper_pipe(
@@ -224,8 +290,13 @@ def analyze_video():
         text_en, tr = preprocess_text(transcript)
         final = infer([text_en], threshold)[0]
 
+    except Exception as e:
+        logger.error(f"Error in /analyze/video: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
     finally:
-        os.remove(video_path)
+        if os.path.exists(video_path):
+            os.remove(video_path)
         if os.path.exists(audio_path):
             os.remove(audio_path)
 
@@ -277,21 +348,7 @@ def analyze_audio_chunk():
             logger.error(f"FFmpeg error: {result.stderr.decode()}")
             return jsonify({"error": "invalid audio format"}), 400
 
-        global whisper_pipe
-        if whisper_pipe is None:
-            logger.info("Loading Whisper on demand...")
-            whisper_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                "openai/whisper-small",
-                torch_dtype=torch.float32
-            ).to("cpu")
-            processor = AutoProcessor.from_pretrained("openai/whisper-small")
-            whisper_pipe = pipeline(
-                "automatic-speech-recognition",
-                model=whisper_model,
-                tokenizer=processor.tokenizer,
-                feature_extractor=processor.feature_extractor,
-                device="cpu"
-            )
+        load_whisper_if_needed()
 
         result = whisper_pipe(
             wav_path,
@@ -303,7 +360,9 @@ def analyze_audio_chunk():
         )
 
         transcript = result["text"].strip()
-        os.remove(wav_path)
+
+        if os.path.exists(wav_path):
+            os.remove(wav_path)
 
         if not transcript:
             return jsonify({
