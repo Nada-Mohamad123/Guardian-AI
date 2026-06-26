@@ -1,3 +1,4 @@
+raise Exception("THIS IS THE NEW VERSION")
 """
 GuardianAI Chatbot — FastAPI service
 RAG + Gemini API
